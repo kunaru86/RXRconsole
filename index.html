@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RUSH XR // AUTOMIX STUDIO</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
     <style>
       @import url("https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Inter:wght@300;500;700&family=JetBrains+Mono:wght@300;500&display=swap");
 
@@ -142,6 +143,13 @@
         <span class="text-xs text-zinc-400">Automix Studio</span>
       </div>
       <div class="flex gap-4 items-center">
+        <button
+          id="record-btn"
+          class="px-4 py-1 bg-red-900/50 hover:bg-red-600 text-red-200 border border-red-800 hover:border-red-500 rounded text-xs font-bold transition-colors flex items-center gap-2"
+        >
+          <div id="record-indicator" class="w-2 h-2 rounded-full bg-red-500"></div>
+          REC
+        </button>
         <div
           id="automix-status"
           class="text-xs px-3 py-1 rounded border border-zinc-700 text-zinc-500 bg-zinc-900 font-bold"
@@ -545,6 +553,14 @@
       let audioCtx;
       let masterGain;
       let isInitialized = false;
+
+      // Recording State
+      let processor;
+      let mp3encoder;
+      let mp3Data = [];
+      let isRecording = false;
+      let mediaRecorder;
+      let recordedChunks = [];
 
       // Queue State
       let queue = [];
@@ -1019,8 +1035,63 @@
       const automixStatus = document.getElementById("automix-status");
       const fadeTimeSlider = document.getElementById("fade-time");
       const fadeTimeVal = document.getElementById("fade-time-val");
+      const recordBtn = document.getElementById("record-btn");
 
       let isCrossfading = false;
+
+      function downloadBlob(blob, filename) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 100);
+      }
+
+      recordBtn.addEventListener("click", () => {
+        if (!isInitialized) return;
+
+        if (!isRecording) {
+          isRecording = true;
+          recordBtn.classList.replace("bg-red-900/50", "bg-red-600");
+          recordBtn.classList.replace("text-red-200", "text-white");
+          recordBtn.innerHTML = `<div id="record-indicator" class="w-2 h-2 rounded-full bg-white animate-pulse"></div> STOP & EXPORT`;
+
+          if (typeof lamejs !== "undefined") {
+            mp3encoder = new lamejs.Mp3Encoder(2, audioCtx.sampleRate, 128);
+            mp3Data = [];
+          } else {
+            const dest = audioCtx.createMediaStreamDestination();
+            masterGain.connect(dest);
+            mediaRecorder = new MediaRecorder(dest.stream);
+            recordedChunks = [];
+            mediaRecorder.ondataavailable = (e) => {
+              if (e.data.size > 0) recordedChunks.push(e.data);
+            };
+            mediaRecorder.start();
+          }
+        } else {
+          isRecording = false;
+          recordBtn.classList.replace("bg-red-600", "bg-red-900/50");
+          recordBtn.classList.replace("text-white", "text-red-200");
+          recordBtn.innerHTML = `<div id="record-indicator" class="w-2 h-2 rounded-full bg-red-500"></div> REC`;
+
+          if (typeof lamejs !== "undefined") {
+            const mp3buf = mp3encoder.flush();
+            if (mp3buf.length > 0) {
+              mp3Data.push(new Int8Array(mp3buf));
+            }
+            const blob = new Blob(mp3Data, { type: "audio/mp3" });
+            downloadBlob(blob, `RUSH_XR_MIX_${new Date().getTime()}.mp3`);
+          } else {
+            mediaRecorder.onstop = () => {
+              const blob = new Blob(recordedChunks, { type: "audio/webm" });
+              downloadBlob(blob, `RUSH_XR_MIX_${new Date().getTime()}.webm`);
+            };
+            mediaRecorder.stop();
+          }
+        }
+      });
 
       fadeTimeSlider.addEventListener("input", (e) => {
         crossfadeDuration = parseFloat(e.target.value);
@@ -1174,6 +1245,32 @@
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         masterGain = audioCtx.createGain();
         masterGain.connect(audioCtx.destination);
+
+        if (typeof lamejs !== "undefined") {
+          processor = audioCtx.createScriptProcessor(4096, 2, 2);
+          masterGain.connect(processor);
+          processor.connect(audioCtx.destination);
+
+          processor.onaudioprocess = function (e) {
+            if (!isRecording) return;
+            const left = e.inputBuffer.getChannelData(0);
+            const right = e.inputBuffer.getChannelData(1);
+
+            const left16 = new Int16Array(left.length);
+            const right16 = new Int16Array(right.length);
+            for (let i = 0; i < left.length; i++) {
+              let l = Math.max(-1, Math.min(1, left[i]));
+              let r = Math.max(-1, Math.min(1, right[i]));
+              left16[i] = l < 0 ? l * 32768 : l * 32767;
+              right16[i] = r < 0 ? r * 32768 : r * 32767;
+            }
+
+            const mp3buf = mp3encoder.encodeBuffer(left16, right16);
+            if (mp3buf.length > 0) {
+              mp3Data.push(new Int8Array(mp3buf));
+            }
+          };
+        }
 
         deckA.initGraph(audioCtx, masterGain);
         deckB.initGraph(audioCtx, masterGain);
